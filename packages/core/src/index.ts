@@ -23,6 +23,7 @@ export { Room, RoomInternalState, validate, type RoomOptions, type DefineInputOp
 export { InputBufferImpl, compileSanitizer, compileSnapshot } from './input/InputBuffer.ts';
 export { type InputAccessor, type InputAPI, type NormalizedInputOptions, type ConsumeOptions, type IdleInput, type IdleContext, type SanitizeInput, type NumericFieldsOf } from './input/types.ts';
 export { Rewind, RewindView, type RewindOptions, type RewindMode } from './Rewind.ts';
+export * from './RenderTimeline.ts';
 export {
   RoomPlugin, definePlugins, attachToTestRoom,
   type RoomPluginOrder, type PluginDependencies, type RoomPluginClass,

@@ -73,6 +73,10 @@ type Input = SchemaType<typeof Input>;
 export class MyRoom extends Room<{ state: MyRoomState, client: MyClient, input: Input }> {
   state = new MyRoomState();
 
+  // Keep authoritative player coordinates long enough for remote circles to
+  // stay on one paused render instant and then replay the missed interval.
+  rewind = this.allowRewindState({ maxRewindMs: 1000 });
+
   // Database-driven plugins — one instance per room. The framework
   // walks this record at __init, computes the lifecycle/message layout
   // ONCE per Room class (cached on the constructor), and installs hook
@@ -136,6 +140,10 @@ export class MyRoom extends Room<{ state: MyRoomState, client: MyClient, input: 
     // map dimensions
     this.state.mapWidth = 800;
     this.state.mapHeight = 600;
+
+    // What the gray remote circle draws at renderTime is exactly what the room
+    // can query through `this.rewind.at(renderTime).value(player, "x" | "y")`.
+    this.rewind.attachAll(this.state.players, { fields: ["x", "y"], maxRewindMs: 1000 });
 
     this.onMessage("__move", (client, message) => {})
     this.onMessage("__dummy", (client, message) => { })

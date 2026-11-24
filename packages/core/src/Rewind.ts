@@ -1,7 +1,7 @@
 import { $values, type MapSchema, type ArraySchema, type SetSchema } from "@colyseus/schema";
 import { $METADATA } from "./utils/Utils.ts";
 
-const DEFAULT_MAX_REWIND_MS = 500;
+const DEFAULT_MAX_REWIND_MS = 1000;
 /** Ring-sizing fallback when the record cadence isn't supplied (manual `record(now)`
  *  without a hint). `allowRewindState` feeds the real sim interval, so this only
  *  matters for ad-hoc manual use. */
@@ -22,7 +22,8 @@ type Collection<E> = MapSchema<E> | ArraySchema<E> | SetSchema<E>;
 /** Options for {@link Rewind.get} / {@link Room.allowRewindState}. */
 export interface RewindOptions {
   /** Default rewind window (ms) for attaches that don't pass their own — sizes the
-   *  per-entity history ring. Per-attach `maxRewindMs` overrides it. Default 500. */
+   *  per-entity history ring. Per-attach `maxRewindMs` overrides it. Default 1000
+   *  ms, long enough to resume from a render instant held through an 800 ms stall. */
   maxRewindMs?: number;
 }
 
@@ -332,6 +333,13 @@ export class Rewind {
    *  Rewind, re-aimed per call (zero alloc, zero userland setup). */
   private readonly _view = new RewindView();
 
+  // Optional pauseable render cursor. The authority ring keeps recording while
+  // this is paused; only this cursor freezes. `at()` seeds it so callers can
+  // write `rewind.at(50)` followed by `rewind.pause()`.
+  private _renderTime = 0;
+  private _renderPlaying = true;
+  private _lastFrameNow: number | undefined;
+
   private constructor(defaultMaxRewindMs: number) { this.defaultMaxRewindMs = defaultMaxRewindMs; }
 
   /** The default rewind window (ms). Use it to bound a hit test:
@@ -475,6 +483,91 @@ export class Rewind {
     this._reckonTimeOf = resolver;
   }
 
+  /** Current shared render timestamp used by {@link renderView}. */
+  get renderTime(): number { return this._renderTime; }
+  get paused(): boolean { return !this._renderPlaying; }
+
+  /** Freeze the shared render cursor at `time` (or its current instant). */
+  pause(time?: number): this {
+    if (typeof time === "number" && Number.isFinite(time)) { this._renderTime = time; }
+    this._renderPlaying = false;
+    this._lastFrameNow = undefined;
+    return this;
+  }
+
+  /** Synonym for {@link pause}. */
+  freeze(time?: number): this { return this.pause(time); }
+  hold(time?: number): this { return this.pause(time); }
+  suspend(time?: number): this { return this.pause(time); }
+  stop(time?: number): this { return this.pause(time); }
+  pauseAt(time: number): this { return this.pause(time); }
+  setPaused(paused: boolean, time?: number): this {
+    return paused ? this.pause(time) : this.resume(time);
+  }
+
+  /**
+   * Resume the render cursor. `wallNow` only anchors frame-delta conversion; it
+   * does NOT seek the render timestamp to the present/newest authority sample.
+   * The first frame at the same `wallNow` therefore remains on the paused point.
+   */
+  resume(wallNow?: number): this {
+    this._renderPlaying = true;
+    if (typeof wallNow === "number") { this._lastFrameNow = wallNow; }
+    return this;
+  }
+
+  unpause(wallNow?: number): this { return this.resume(wallNow); }
+  unfreeze(wallNow?: number): this { return this.resume(wallNow); }
+  play(wallNow?: number): this { return this.resume(wallNow); }
+  start(wallNow?: number): this { return this.resume(wallNow); }
+  resumeAt(wallNow: number): this { return this.resume(wallNow); }
+
+  /** Seek the shared render cursor without changing playing state. */
+  seekRenderTime(time: number): this { this._renderTime = time; return this; }
+  setRenderTime(time: number): this { this._renderTime = time; return this; }
+
+  /** Advance the shared render cursor using an absolute frame time or delta. */
+  tick(now?: number, deltaMs?: number): number {
+    if (!this._renderPlaying) { return this._renderTime; }
+    if (typeof deltaMs === "number" && Number.isFinite(deltaMs)) {
+      this._renderTime += deltaMs;
+      if (typeof now === "number") { this._lastFrameNow = now; }
+      return this._renderTime;
+    }
+    if (typeof now !== "number" || !Number.isFinite(now)) { return this._renderTime; }
+    if (this._lastFrameNow === undefined) {
+      this._lastFrameNow = now;
+      return this._renderTime;
+    }
+    this._renderTime += Math.max(0, now - this._lastFrameNow);
+    this._lastFrameNow = now;
+    return this._renderTime;
+  }
+
+  /** A view at the pauseable shared {@link renderTime}. */
+  renderView(out?: RewindView): RewindView {
+    return this.at(this._renderTime, out);
+  }
+
+  /** `{x,y}` at an explicit time (or the shared render cursor when omitted). */
+  positionAt<T extends object>(instance: T, time?: number, fields: readonly [string, string] = ["x", "y"]): { x: number; y: number } {
+    const at = time ?? this._renderTime;
+    return {
+      x: this.valueAt(instance, at, fields[0] as NumericKeys<T>),
+      y: this.valueAt(instance, at, fields[1] as NumericKeys<T>),
+    };
+  }
+
+  /** Canvas-facing alias for {@link positionAt} at the shared render time. */
+  renderPosition<T extends object>(instance: T): { x: number; y: number } {
+    return this.positionAt(instance);
+  }
+
+  /** Alias for callers using timeline vocabulary. */
+  sample<T extends object>(instance: T, time?: number): { x: number; y: number } {
+    return this.positionAt(instance, time);
+  }
+
   /**
    * A {@link RewindView} of the tracked world at `time` (an acting client's render
    * time), with the two things every hit test re-implements baked in:
@@ -492,7 +585,9 @@ export class Rewind {
    * only to hold several views at once — see the {@link RewindView} doc.
    */
   at(time: number, out?: RewindView): RewindView {
-    return this._aim(time, 0, out);
+    const view = this._aim(time, 0, out);
+    this._renderTime = view.time;
+    return view;
   }
 
   /**
@@ -563,10 +658,12 @@ export class Rewind {
         "or call `at(time)` and pass the render time yourself.",
       );
     }
-    return this._aim(
+    const view = this._aim(
       this._renderTimeOf(sessionId),
       this._reckonTimeOf !== undefined ? this._reckonTimeOf(sessionId) : 0,
       out,
     );
+    this._renderTime = view.time;
+    return view;
   }
 }

@@ -80,3 +80,5 @@ export {
     type SpawnEntry,
     type SpawnHandle,
 } from './predict/predictedSpawns.ts';
+
+export * from './RenderTimeline.ts';

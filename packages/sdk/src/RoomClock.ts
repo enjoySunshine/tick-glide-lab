@@ -76,6 +76,12 @@ export interface RoomClockLike {
  */
 export interface RoomClock extends RoomClockLike {
     renderNow(): number;
+    /** Optional pause of the render-only timeline. */
+    pauseRender?(): unknown;
+    /** Optional resume of the render-only timeline. */
+    resumeRender?(): unknown;
+    pause?(): unknown;
+    resume?(): unknown;
 }
 
 /**
@@ -203,6 +209,7 @@ export class RoomClockImpl implements RoomClock {
     private _renderTau = RoomClockImpl.RENDER_TAU; // slew time-constant (ms); 0 disables
     private _renderSn = 0;          // slew-limited render-clock reading (ms since room start)
     private _renderSnAt = 0;        // local time (now()) the render clock last advanced
+    private _renderPaused = false;  // freeze renderNow() without stopping serverNow()
 
     /** Estimated server clock: **milliseconds since room start** (the server's
      *  `clock.elapsedTime`, reconstructed via the wire `sNow` + local offset).
@@ -222,8 +229,13 @@ export class RoomClockImpl implements RoomClock {
      *  it. */
     public renderNow(): number {
         const target = this.serverNow();
-        if (this._renderTau <= 0) { return target; }
         const t = now();
+        if (this._renderPaused) {
+            if (this._renderSn === 0) { this._renderSn = target; }
+            this._renderSnAt = t;
+            return this._renderSn;
+        }
+        if (this._renderTau <= 0) { return target; }
         // Seed on first use — jump straight to the current server-present.
         if (this._renderSn === 0) { this._renderSn = target; this._renderSnAt = t; return this._renderSn; }
         const dt = Math.min(t - this._renderSnAt, 100); // clamp tab-resume stalls
@@ -243,6 +255,27 @@ export class RoomClockImpl implements RoomClock {
     public setRenderTau(milliseconds: number): void {
         this._renderTau = milliseconds > 0 ? milliseconds : 0;
     }
+
+    /** Freeze only the drawn/render timeline; serverNow and RTT sync continue. */
+    public pauseRender(): this {
+        if (!this._renderPaused && this._renderSn === 0) {
+            this._renderSn = this.serverNow();
+            this._renderSnAt = now();
+        }
+        this._renderPaused = true;
+        return this;
+    }
+
+    /** Resume the render timeline without jumping across the paused interval. */
+    public resumeRender(): this {
+        this._renderPaused = false;
+        this._renderSnAt = now();
+        return this;
+    }
+
+    public pause(): this { return this.pauseRender(); }
+    public resume(): this { return this.resumeRender(); }
+    public get renderPaused(): boolean { return this._renderPaused; }
 
     /** Local monotonic clock (ms): the client's own reading WITHOUT the server
      *  offset — the base {@link serverNow} adds the offset to. Use it for

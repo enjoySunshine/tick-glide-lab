@@ -41,3 +41,6 @@ packages/database/drizzle/
 pnpm-publish-summary.json
 .env
 .env.*
+
+# Local pnpm content-addressable store created during benchmark setup
+.pnpm-store/
